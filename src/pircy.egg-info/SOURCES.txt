@@ -1,0 +1,12 @@
+README.md
+setup.py
+src/pircy/__init__.py
+src/pircy/cli.py
+src/pircy/main.py
+src/pircy/pluginbase.py
+src/pircy.egg-info/PKG-INFO
+src/pircy.egg-info/SOURCES.txt
+src/pircy.egg-info/dependency_links.txt
+src/pircy.egg-info/entry_points.txt
+src/pircy.egg-info/requires.txt
+src/pircy.egg-info/top_level.txt

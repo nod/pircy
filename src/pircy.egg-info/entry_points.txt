@@ -1,0 +1,3 @@
+[console_scripts]
+pircy = pircy.cli:cli
+

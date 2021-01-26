@@ -1,0 +1,8 @@
+[Unit]
+Description=Pircy The Python IRC Server
+
+[Service]
+ExecStart=/usr/bin/pircy
+
+[Install]
+WantedBy=multi-user.target
