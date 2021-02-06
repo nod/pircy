@@ -1,5 +1,21 @@
 
+import asyncio, hashlib, logging, os, pwd, socket
+from concurrent.futures import ThreadPoolExecutor
+
 import click
+import hcl
+
+import pircy.main as main
+from .pluginbase import PluginBase, PluginSource
+from .util import gen_password
+
+try:
+    import uvloop
+except ImportError:
+    uvloop = None
+
+
+ScriptContext = main.ScriptContext
 
 class color:
     purple = '\033[95m'
@@ -29,15 +45,13 @@ def apply_config(config):
         oper_block = config["oper"]
         # NOTE(ljb): Should be a list of username / password_hash tuples.
         if "username" in oper_block:
-            global OPER_USERNAME
             if oper_block["username"] == True:
-                OPER_USERNAME = os.getenv("USER")
+                main.OPER_USERNAME = os.getenv("USER")
             else:
-                OPER_USERNAME = oper_block["username"]
+                main.OPER_USERNAME = oper_block["username"]
 
         if "password" in oper_block:
-            global OPER_PASSWORD
-            OPER_PASSWORD = oper_block["password"]
+            main.OPER_PASSWORD = oper_block["password"]
 
     if not "server" in config:
         raise ConfigurationError("\"server\" block missing from Psyrcd configuration.")
@@ -51,14 +65,11 @@ def apply_config(config):
         global SRV_NAME
         SRV_NAME = server_block["name"]
     if "domain" in server_block:
-        global SRV_DOMAIN
-        SRV_DOMAIN = server_block["domain"]
+        main.SRV_DOMAIN = server_block["domain"]
     if "description" in server_block:
-        global SRV_DESCRIPTION
-        SRV_DESCRIPTION = server_block["description"]
+        main.SRV_DESCRIPTION = server_block["description"]
     if "welcome" in server_block:
-        global SRV_WELCOME
-        SRV_WELCOME = server_block["welcome"].format(SRV_NAME)
+        main.SRV_WELCOME = server_block["welcome"].format(SRV_NAME)
 
     if "ping_frequency" in server_block:
         global PING_FREQUENCY
@@ -114,9 +125,11 @@ def version():
 @click.option('-c', '--config', default='pircy.conf', help='config file')
 @click.option('-l', '--logfile', default='stdout',
     help='log file or leave absent for stdout')
+@click.option('-p', '--pidfile', default=False, help='pidfile path')
 @click.option('-d', '--debug', default=False, help='debug')
-@click.option('-f', '--foreground', default=False, help='run in foreground')
-def run(config, logfile, debug, foreground):
+@click.option('-f', '--foreground', is_flag=True, default=False,
+    help='run in foreground')
+def run(config, logfile, pidfile, debug, foreground):
     prog = "pircy"
     description = "The %spIRCy%s Server." % (color.orange,color.end)
     epilog = "Using the %s-k%s and %s-c%s options together enables SSL and plaintext connections over the same port." % \
@@ -151,24 +164,25 @@ def run(config, logfile, debug, foreground):
         logging.info("Running as root is not permitted.")
         raise SystemExit
 
-    if OPER_PASSWORD == True:
-        OPER_PASSWORD = hashlib.new('sha512', str(os.urandom(20))\
-                            .encode('utf-8')).hexdigest()[:20]
-
-    print("Netadmin login: %s/oper %s %s%s" % \
-        (color.green, OPER_USERNAME, OPER_PASSWORD, color.end))
+    if main.OPER_PASSWORD == True:
+        main.OPER_PASSWORD = gen_password()
+    print("Netadmin login: {}/oper {} {}{}".format(
+        color.green, main.OPER_USERNAME, main.OPER_PASSWORD, color.end) )
     # Detach from console, reparent to init
     if not foreground:
-        Daemon(options.pidfile)
+        pidfile = pidfile or config['runtime']['pidfile']
+        main.Daemon(pidfile)
 
     # Hash the password in memory.
-    OPER_PASSWORD = hashlib.sha512(OPER_PASSWORD.encode('utf-8')).hexdigest()
+    main.OPER_PASSWORD = hashlib.sha512(
+        main.OPER_PASSWORD.encode('utf-8')).hexdigest()
 
-    if config.ssl_cert and config.ssl_key:
+    if config['runtime']['ssl_cert'] and config['runtime']['ssl_key']:
         logging.info("SSL Enabled.")
 
     # Set variables for processing script files:
-    for scripts_dir in options.scripts_dir:
+    scripts_dir = config['runtime']['script_dir']
+    if scripts_dir:
         this_dir = os.path.abspath(os.path.curdir) + os.path.sep
         scripts_dir = this_dir + scripts_dir + os.path.sep
         if os.path.isdir(scripts_dir):
@@ -182,28 +196,29 @@ def run(config, logfile, debug, foreground):
 
     ThreadPool = ThreadPoolExecutor(MAX_CLIENTS)
     EventLoop  = asyncio.get_event_loop()
-    ircserver  = IRCServer(
+    ircserver  = main.IRCServer(
                     EventLoop,
                     config,
-                    (options.listen_address, int(options.listen_port)),
-                    options.plugin_paths,
-                    read_on_exec=options.debug,
+                    (config['runtime']['listen_address'],
+                        int(config['runtime']['listen_port']) ),
+                    config['runtime']['plugin_paths'],
+                    read_on_exec=debug,
                     )
     # Start.
     try:
-        if options.preload:
-            if options.plugin_paths:
-                ircserver.plugins.init(config)
+        if config['runtime']['plugin_paths']:
+            ircserver.plugins.init(config)
 
-            if scripts_dir:
-                for filename in os.listdir(scripts_dir):
-                    if os.path.isfile(scripts_dir + filename):
-                        ircserver.scripts.load(filename)
+        if scripts_dir:
+            for filename in os.listdir(scripts_dir):
+                if os.path.isfile(scripts_dir + filename):
+                    ircserver.scripts.load(filename)
 
-        ircserver.loop.call_later(PING_FREQUENCY, ping_routine, EventLoop)
-        logging.info('Starting pircy on %s:%s' % \
-            (options.listen_address, options.listen_port))
-        ircserver.loop.set_debug(options.debug)
+        ircserver.loop.call_later(PING_FREQUENCY, main.ping_routine, EventLoop)
+        logging.info('Starting pircy on {}:{}'.format(
+            config['runtime']['listen_address'],
+            config['runtime']['listen_port'] ))
+        ircserver.loop.set_debug(debug)
         ircserver.loop.run_forever()
     except socket.error as e:
         logging.error(repr(e))
@@ -211,7 +226,7 @@ def run(config, logfile, debug, foreground):
     except KeyboardInterrupt:
         ircserver.loop.stop()
         ThreadPool.shutdown()
-        if options.preload and scripts_dir:
+        if scripts_dir:
             scripts = []
             for x in ircserver.scripts.i.values():
                 for script in x.values():

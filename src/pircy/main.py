@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-# _*_ coding: UTF-8 _*_
-
-# psyrcd the Psybernetics IRC server.
+# pircy the pythonic IRC server.
+# - forked from psyrcd the Psybernetics IRC server.
 # Based on hircd.py. Modifications have been added for robustness and flexibility.
 # Gratitude to Ferry Boender for starting this off
 # http://www.electricmonk.nl/log/2009/09/14/hircd-minimal-irc-server-in-python/
@@ -28,8 +26,6 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 
 # Todo:
-#   - Check the PID file on startup. Issue a warning and raise SystemExit
-#     if psyrcd is already running.
 #   - Implement /userhost
 #   - Implement all user and channel modes.
 #   - Fix TODO comments.
@@ -57,17 +53,31 @@
 version = 2.0
 
 from concurrent.futures import ThreadPoolExecutor
-import sys, os, re, pwd, time, argparse, importlib, logging, hashlib, asyncio, socket, ssl, json
+
+import argparse, asyncio, hashlib, importlib, json
+import logging, os, pwd, re, socket, ssl, sys, time
 
 try:
     import uvloop # https://github.com/MagicStack/uvloop
 except ImportError:
     uvloop = None
 
-from . pluginbase import PluginBase, PluginSource
+from .pluginbase import PluginBase, PluginSource
 
 # These constants enable the IRCD to function without a configuration file:
 SRV_CREATED     = time.asctime()
+SRV_DOMAIN = 'pircy.irc'
+SRV_DESCRIPTION = 'just another irc server'
+SRV_VERSION = 1.0
+
+MAX_NICKLEN = 12
+MAX_CHANNELS = 99
+MAX_TOPICLEN = 128
+MAX_CLIENTS = 128
+MAX_IDLE = 500
+
+OPER_PASSWORD = False
+OPER_USERNAME = 'superoper'
 
 PING_FREQUENCY = 60   # Time in seconds between PING messages to clients.
 
@@ -2544,10 +2554,10 @@ class IRCServer(object):
         self.clients        = {}            # Connected clients (IRCClient instances) by nickname.
         self.connections    = set()
         self.opers          = {}            # Authenticated IRCops (IRCOperator instances) by nickname.
-        self.scripts        = Scripts(self) # The scripts object we attach external execution routines to.
+        self.scripts        = Scripts(self, config['runtime']['script_dir']) # The scripts object we attach external execution routines to.
         self.plugins        = Plugins(
                                         self,
-                                        pluginbase.PluginBase("plugins"),
+                                        PluginBase("plugins"),
                                         searchpath=plugin_paths,
                                         read_on_exec=read_on_exec,
                                     )
@@ -2811,7 +2821,7 @@ class Plugin(dict):
         return "<Plugin %s:%s at %s>" % \
             (self["type"], self["name"], hex(id(self)))
 
-class Plugins(pluginbase.PluginSource):
+class Plugins(PluginSource):
     """
     Plugins available at self.mod. I.e. self.load("foo") loads foo onto self.mod.foo.
 
@@ -2824,7 +2834,7 @@ class Plugins(pluginbase.PluginSource):
         self.server       = server
         self.read_on_exec = read_on_exec
         self.list_available_plugins = self.list_plugins
-        pluginbase.PluginSource.__init__(self, base, identifier, searchpath, persist)
+        PluginSource.__init__(self, base, identifier, searchpath, persist)
 
     def load(self, plugin_name: str, config={}, reload=True) -> bool:
         """
@@ -2919,8 +2929,8 @@ class Plugins(pluginbase.PluginSource):
     def __repr__(self):
         return "<Plugins at %s>" % hex(id(self))
 
-class Scripts(object):
-    def __init__(self, server=None):
+class Scripts:
+    def __init__(self, server=None, scripts_dir=None):
         self.server   = server
         self.dir      = scripts_dir
         self.server   = 0
@@ -3218,7 +3228,7 @@ class Daemon:
         os.umask(0)
         try:
             pid = os.fork()
-            if pid > 0:
+            if pid > 0 and pidfile:
                 try:
                     # TODO: Read the file first and determine if already running.
                     f = open(pidfile, 'w')
